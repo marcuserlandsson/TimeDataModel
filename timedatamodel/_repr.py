@@ -11,6 +11,7 @@ This module contains:
 
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 from html import escape
 from itertools import product
@@ -28,11 +29,12 @@ if TYPE_CHECKING:
 # Module-level state
 # ---------------------------------------------------------------------------
 
-_default_repr_width: int | None = None  # None = no limit
+_WIDTH_USE_DEFAULT = object()  # Sentinel: use terminal size or 80 at render time
+_default_repr_width: int | None | object = _WIDTH_USE_DEFAULT
 
 
 def set_repr_width(width: int | None) -> None:
-    """Set max repr box width. None = no limit."""
+    """Set max repr box width. None = no limit (explicit). Unset = use terminal/80."""
     global _default_repr_width
     if width is not None and width < 10:
         raise ValueError("repr width must be at least 10 or None")
@@ -40,8 +42,20 @@ def set_repr_width(width: int | None) -> None:
 
 
 def get_repr_width() -> int | None:
-    """Return current max repr width (None = no limit)."""
-    return _default_repr_width
+    """Return current max repr width (None = no limit or use default)."""
+    return _default_repr_width if isinstance(_default_repr_width, int) else None
+
+
+def _get_effective_repr_width() -> int | None:
+    """Return effective max width for rendering: terminal/80 when unset, None when no limit."""
+    if _default_repr_width is None:
+        return None
+    if _default_repr_width is _WIDTH_USE_DEFAULT:
+        try:
+            return shutil.get_terminal_size().columns
+        except (OSError, AttributeError):
+            return 80
+    return int(_default_repr_width)
 
 
 _MAX_PREVIEW = 3  # rows shown at head/tail in repr
@@ -79,9 +93,22 @@ def _fmt_timestamp_cells(ts: datetime | tuple[datetime, ...]) -> str:
     return f"<td>{escape(_fmt_short_date(ts))}</td>"
 
 
-def _format_meta_lines(pairs: list[tuple[str, str]], label_w: int = 18) -> list[str]:
-    """Convert (label, value) pairs to formatted terminal meta lines."""
-    return [f"{label + ':':<{label_w}}{value}" for label, value in pairs]
+def _format_meta_lines(
+    pairs: list[tuple[str, str]],
+    label_w: int = 18,
+    max_content: int | None = None,
+) -> list[str]:
+    """Convert (label, value) pairs to formatted terminal meta lines.
+
+    When max_content is set, values are truncated so each line does not exceed max_content.
+    """
+    lines: list[str] = []
+    for label, value in pairs:
+        prefix = f"{label + ':':<{label_w}}"
+        if max_content is not None and len(prefix) + len(value) > max_content:
+            value = _truncate(value, max_content - len(prefix))
+        lines.append(prefix + value)
+    return lines
 
 
 def _fmt_tz_with_offset(tz_str: str, timestamps: list) -> str:
@@ -129,34 +156,51 @@ _css_cache_version: int = -1
 def _repr_css() -> str:
     lt = THEME["light"]
     dk = THEME["dark"]
+    repr_border_lt = lt.get("repr_border", "#e5e7eb")
+    repr_border_dk = dk.get("repr_border", "#334155")
     return f"""\
 <style>
-.ts-repr {{ font-family: monospace; font-size: 13px; max-width: 640px; display: inline-grid; }}
-.ts-repr .ts-header {{
-  font-weight: bold; font-size: 14px;
-  padding: 6px 10px; border-bottom: 2px solid {lt["header_border"]};
-  background: {lt["header_bg"]}; color: {lt["header_text"]};
+.ts-repr {{
+  font-family: monospace; font-size: 13px; max-width: 640px; display: inline-grid;
+  border-radius: 8px; border: 1px solid {repr_border_lt};
+  box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 1px 2px rgba(0,0,0,.04);
+  overflow: hidden;
 }}
-.ts-repr .ts-meta {{ padding: 6px 10px; background: {lt["meta_bg"]}; overflow: hidden; min-width: 0; }}
+.ts-repr .ts-header {{
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-weight: 600; font-size: 15px; letter-spacing: 0.02em;
+  padding: 10px 14px; border-bottom: 2px solid {lt["header_border"]};
+  background: {lt["header_bg"]}; color: {lt["header_text"]};
+  border-radius: 8px 8px 0 0;
+}}
+.ts-repr .ts-meta {{ padding: 8px 12px; background: {lt["meta_bg"]}; overflow: hidden; min-width: 0; }}
 .ts-repr .ts-meta table {{ border-collapse: collapse; width: 100%; table-layout: fixed; }}
 .ts-repr .ts-meta td {{ padding: 1px 8px 1px 0; white-space: nowrap; }}
 .ts-repr .ts-meta td:first-child {{ color: {lt["meta_label"]}; font-weight: 600; width: 90px; }}
 .ts-repr .ts-meta td:last-child {{ color: {lt["meta_value"]}; overflow: hidden; text-overflow: ellipsis; }}
-.ts-repr .ts-data {{ padding: 6px 10px; }}
+.ts-repr .ts-data {{ padding: 8px 12px; overflow-x: auto; margin-top: 0; }}
 .ts-repr .ts-data table {{
-  border-collapse: collapse; text-align: right;
+  border-collapse: collapse; text-align: right; table-layout: fixed; width: 100%;
+  line-height: 1.45;
 }}
 .ts-repr .ts-data th {{
-  text-align: right; padding: 3px 10px; border-bottom: 1px solid {lt["col_header_border"]};
+  text-align: right; padding: 4px 10px; border-bottom: 1px solid {lt["col_header_border"]};
   color: {lt["col_header_text"]}; font-weight: 600;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
 }}
-.ts-repr .ts-data th.ts-idx {{ text-align: left; }}
-.ts-repr .ts-data td {{ padding: 2px 10px; }}
+.ts-repr .ts-data th.ts-idx {{ text-align: left; min-width: 140px; width: 1%; }}
+.ts-repr .ts-data td {{ padding: 4px 10px; font-variant-numeric: tabular-nums; white-space: nowrap; }}
+.ts-repr .ts-data tr {{ transition: background-color .12s ease; }}
 .ts-repr .ts-data tr:hover {{ background: {lt["hover_bg"]}; }}
-.ts-repr .ts-data td:first-child {{ text-align: left; color: {lt["index_text"]}; }}
+.ts-repr .ts-data td:focus-visible, .ts-repr .ts-data th:focus-visible {{
+  outline: 2px solid {lt["header_border"]}; outline-offset: 2px;
+}}
+.ts-repr .ts-data td:first-child {{ text-align: left; color: {lt["index_text"]}; min-width: 140px; }}
 .ts-repr .ts-data td.ts-idx {{ text-align: left; color: {lt["index_text"]}; }}
 .ts-repr .ts-ellipsis {{ text-align: center !important; color: {lt["ellipsis"]}; }}
+.ts-repr .ts-data .ts-empty {{ padding: 12px 16px; text-align: center; color: {lt["ellipsis"]}; font-style: italic; }}
 @media (prefers-color-scheme: dark) {{
+  .ts-repr {{ border-color: {repr_border_dk}; box-shadow: 0 2px 6px rgba(0,0,0,.2); }}
   .ts-repr .ts-header {{ background: {dk["header_bg"]}; color: {dk["header_text"]}; border-color: {dk["header_border"]}; }}
   .ts-repr .ts-meta {{ background: {dk["meta_bg"]}; }}
   .ts-repr .ts-meta td:first-child {{ color: {dk["meta_label"]}; }}
@@ -166,7 +210,9 @@ def _repr_css() -> str:
   .ts-repr .ts-data td:first-child {{ color: {dk["index_text"]}; }}
   .ts-repr .ts-data td.ts-idx {{ color: {dk["index_text"]}; }}
   .ts-repr .ts-data tr:hover {{ background: {dk["hover_bg"]}; }}
+  .ts-repr .ts-data td:focus-visible, .ts-repr .ts-data th:focus-visible {{ outline-color: {dk["header_border"]}; }}
   .ts-repr .ts-ellipsis {{ color: {dk["ellipsis"]}; }}
+  .ts-repr .ts-data .ts-empty {{ color: {dk["ellipsis"]}; }}
 }}
 </style>"""
 
@@ -216,22 +262,19 @@ def _build_repr_html(
 
     if n_rows == 0:
         html.append(
-            f'<tr><td colspan="{total_cols}" class="ts-ellipsis">'
+            f'<tr><td colspan="{total_cols}" class="ts-ellipsis ts-empty">'
             f"(empty)</td></tr>"
         )
     else:
         show_all = n_rows <= max_preview * 2 + 1
-        head_rows = range(min(max_preview, n_rows))
-        tail_rows = (
-            range(max(n_rows - max_preview, max_preview), n_rows)
-            if not show_all
-            else range(0)
-        )
-
-        for i in head_rows:
-            html.append(html_row_fn(i))
-
-        if not show_all:
+        if show_all:
+            for i in range(n_rows):
+                html.append(html_row_fn(i))
+        else:
+            head_rows = range(min(max_preview, n_rows))
+            tail_rows = range(max(n_rows - max_preview, max_preview), n_rows)
+            for i in head_rows:
+                html.append(html_row_fn(i))
             ellipsis_cells = "".join(
                 '<td class="ts-ellipsis">&hellip;</td>'
                 for _ in range(total_cols)
@@ -255,10 +298,10 @@ def _render_box(
 
     ``None`` entries in *content_lines* are drawn as horizontal separators.
     *max_width* caps the total box width (border + padding + content).
-    Defaults to the global ``get_repr_width()`` setting when ``None``.
+    When ``None``, uses effective width (terminal size or 80 if unset; no limit if set to None).
     """
     if max_width is None:
-        max_width = get_repr_width()
+        max_width = _get_effective_repr_width()
 
     max_w = max((len(line) for line in content_lines if line is not None), default=0)
 
@@ -380,7 +423,7 @@ class CoverageBar:
                 parts.append(
                     f'<rect x="{x:.1f}" y="{y + 2}" '
                     f'width="{seg_w:.2f}" height="{row_h - 4}" '
-                    f'fill="{color}" />'
+                    f'rx="2" ry="2" fill="{color}" />'
                 )
 
         # date labels
@@ -441,12 +484,19 @@ class HierarchyTree:
             )
 
     def _repr_html_(self) -> str:
-        css = """\
+        lt = THEME["light"]
+        dk = THEME["dark"]
+        border_lt = lt.get("repr_border", "#e5e7eb")
+        border_dk = dk.get("repr_border", "#334155")
+        css = f"""\
 <style>
-.tsh-tree { font-family: monospace; font-size: 13px; }
-.tsh-tree details { margin-left: 16px; }
-.tsh-tree summary { cursor: pointer; padding: 1px 0; }
-.tsh-tree .tsh-leaf { margin-left: 16px; padding: 1px 0; }
+.tsh-tree {{ font-family: monospace; font-size: 13px; border-left: 2px solid {border_lt}; padding-left: 12px; margin-left: 4px; }}
+.tsh-tree details {{ margin-left: 16px; }}
+.tsh-tree summary {{ cursor: pointer; padding: 4px 0; font-weight: 600; }}
+.tsh-tree .tsh-leaf {{ margin-left: 16px; padding: 4px 0; }}
+@media (prefers-color-scheme: dark) {{
+  .tsh-tree {{ border-left-color: {border_dk}; }}
+}}
 </style>"""
         return css + '\n<div class="tsh-tree">\n' + self._html_node(self._root) + "</div>"
 
@@ -475,18 +525,19 @@ class HierarchyTree:
 
 
 def _datapoint_repr(self) -> str:
-    meta_lines: list[str] = []
-
+    pairs: list[tuple[str, str]] = []
     ts_str = _fmt_short_date(self.timestamp)
-    meta_lines.append(f"Timestamp:  {ts_str}")
-
+    pairs.append(("Timestamp", ts_str))
     if hasattr(self.timestamp, "utcoffset") and self.timestamp.utcoffset() is not None:
         tz_str = str(self.timestamp.tzinfo)
         tz_display = _fmt_tz_with_offset(tz_str, [self.timestamp])
-        meta_lines.append(f"Timezone:   {tz_display}")
+        pairs.append(("Timezone", tz_display))
+    pairs.append(("Value", _fmt_value(self.value)))
 
-    meta_lines.append(f"Value:      {_fmt_value(self.value)}")
-
+    _padding = 2
+    effective = _get_effective_repr_width()
+    max_content = (effective - 2 * _padding - 2) if effective is not None else None
+    meta_lines = _format_meta_lines(pairs, max_content=max_content)
     return _render_box("DataPoint", meta_lines)
 
 
@@ -527,8 +578,14 @@ class _TimeSeriesBaseReprMixin:
         return _format_meta_lines(self._repr_meta_pairs())
 
     def __repr__(self) -> str:
+        _padding = 2
+        effective = _get_effective_repr_width()
+        max_content = (effective - 2 * _padding - 2) if effective is not None else None
+
         class_name = type(self).__name__
-        meta_lines = self._repr_meta_lines()
+        meta_lines = _format_meta_lines(
+            self._repr_meta_pairs(), max_content=max_content
+        )
         n = len(self._timestamps)
 
         # Compute preview row indices
@@ -576,9 +633,19 @@ class _TimeSeriesBaseReprMixin:
                 for j in range(ncols_data):
                     col_widths[j] = max(col_widths[j], 3)
 
+            # Cap total line length to max_content when set
+            if max_content is not None and ncols_data > 0:
+                sep_len = 2 * (ncols_data - 1)  # "  " between columns
+                total = sum(col_widths) + sep_len
+                if total > max_content:
+                    excess = total - max_content
+                    col_widths[0] = max(3, col_widths[0] - excess)
+
             def _format_row(row: list[str]) -> str:
                 parts: list[str] = []
                 for j, cell in enumerate(row):
+                    if len(cell) > col_widths[j]:
+                        cell = _truncate(cell, col_widths[j])
                     if j == 0:
                         parts.append(f"{cell:<{col_widths[j]}}")
                     else:
@@ -794,7 +861,13 @@ class _TimeSeriesArrayReprMixin:
         return pairs
 
     def __repr__(self) -> str:
-        return _render_box(type(self).__name__, _format_meta_lines(self._repr_meta_pairs()))
+        _padding = 2
+        effective = _get_effective_repr_width()
+        max_content = (effective - 2 * _padding - 2) if effective is not None else None
+        meta_lines = _format_meta_lines(
+            self._repr_meta_pairs(), max_content=max_content
+        )
+        return _render_box(type(self).__name__, meta_lines)
 
     def _repr_html_(self) -> str:
         n_dims = self.ndim
@@ -1106,8 +1179,14 @@ class _HierarchicalTimeSeriesReprMixin:
         return rows[:3] + [{h: "..." for h in headers}] + rows[-3:]
 
     def __repr__(self) -> str:
+        _padding = 2
+        effective = _get_effective_repr_width()
+        max_content = (effective - 2 * _padding - 2) if effective is not None else None
+
         class_name = type(self).__name__
-        meta_lines = _format_meta_lines(self._repr_meta_pairs())
+        meta_lines = _format_meta_lines(
+            self._repr_meta_pairs(), max_content=max_content
+        )
 
         # Leaf table
         rows = self._leaf_display_rows()
@@ -1117,8 +1196,21 @@ class _HierarchicalTimeSeriesReprMixin:
             for h in headers:
                 col_widths[h] = max(col_widths[h], len(row[h]))
 
+        if max_content is not None and headers:
+            sep_len = 2 * (len(headers) - 1)
+            total = sum(col_widths[h] for h in headers) + sep_len
+            if total > max_content:
+                excess = total - max_content
+                col_widths["name"] = max(3, col_widths["name"] - excess)
+
         def _fmt_row(vals: dict[str, str]) -> str:
-            return "  ".join(f"{vals[h]:<{col_widths[h]}}" for h in headers)
+            parts = []
+            for h in headers:
+                v = vals[h]
+                if len(v) > col_widths[h]:
+                    v = _truncate(v, col_widths[h])
+                parts.append(f"{v:<{col_widths[h]}}")
+            return "  ".join(parts)
 
         header_line = _fmt_row({h: h for h in headers})
 
@@ -1198,6 +1290,10 @@ class _TimeSeriesCollectionReprMixin:
         if not self._series:
             return f"{type(self).__name__}(empty)"
 
+        _padding = 2
+        effective = _get_effective_repr_width()
+        max_content = (effective - 2 * _padding - 2) if effective is not None else None
+
         rows = [
             self._item_summary(k, v) for k, v in self._series.items()
         ]
@@ -1207,8 +1303,21 @@ class _TimeSeriesCollectionReprMixin:
             for h in headers:
                 col_widths[h] = max(col_widths[h], len(row[h]))
 
+        if max_content is not None and headers:
+            sep_len = 2 * (len(headers) - 1)
+            total = sum(col_widths[h] for h in headers) + sep_len
+            if total > max_content:
+                excess = total - max_content
+                col_widths["name"] = max(3, col_widths["name"] - excess)
+
         def _fmt_row(vals: dict) -> str:
-            return "  ".join(f"{vals[h]:<{col_widths[h]}}" for h in headers)
+            parts = []
+            for h in headers:
+                v = vals[h]
+                if len(v) > col_widths[h]:
+                    v = _truncate(v, col_widths[h])
+                parts.append(f"{v:<{col_widths[h]}}")
+            return "  ".join(parts)
 
         header_line = _fmt_row({h: h for h in headers})
         content_lines: list[str | None] = [header_line]

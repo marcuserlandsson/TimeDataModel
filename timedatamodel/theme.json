@@ -15,7 +15,8 @@
     "coverage_present": "#4CAF50",
     "coverage_absent": "#e0e0e0",
     "coverage_label": "#333",
-    "coverage_date": "#666"
+    "coverage_date": "#666",
+    "repr_border": "#e5e7eb"
   },
   "dark": {
     "header_bg": "#1e293b",
@@ -29,6 +30,7 @@
     "data_text": "#e2e8f0",
     "index_text": "#cbd5e1",
     "hover_bg": "#1e293b",
-    "ellipsis": "#64748b"
+    "ellipsis": "#64748b",
+    "repr_border": "#334155"
   }
 }
